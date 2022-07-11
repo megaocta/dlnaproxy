@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -19,8 +21,14 @@ import (
 )
 
 var ad *ssdp.Advertiser
-var target, listen *string
+var target *string
+var listen string
 var transcode *bool
+
+type Iface struct {
+	InterfaceName string
+	InterfaceIP   string
+}
 
 func onSearch(m *ssdp.SearchMessage) {
 	if strings.Contains(m.Type, "ssdp:all") || strings.Contains(m.Type, "service:ContentDirectory") || strings.Contains(m.Type, "service:ConnectionManager") || strings.Contains(m.Type, "device:MediaServer") {
@@ -42,7 +50,7 @@ func rewriteBody(resp *http.Response) (err error) {
 			if err != nil {
 				return err
 			}
-			b = bytes.Replace(b, []byte("http://"+*target+"/"), []byte("http://"+*listen+"/"), -1) // replace original url with proxy url
+			b = bytes.Replace(b, []byte("http://"+*target+"/"), []byte("http://"+listen+"/"), -1) // replace original url with proxy url
 			body := ioutil.NopCloser(bytes.NewReader(b))
 			resp.Body = body
 			resp.ContentLength = int64(len(b))
@@ -89,29 +97,53 @@ func rewriteBody(resp *http.Response) (err error) {
 }
 
 func main() {
-	listen = flag.String("listen", "127.0.0.1:8080", "The IP to listen for requests")
-	target = flag.String("target", "127.0.0.1:8201", "The IP and port of the target")
-	transcode = flag.Bool("transcode", false, "Transcode unsupported audio (experimental)")
-	flag.Parse()
-
-	f, _ := os.Create("dlnaproxy." + strings.Replace(*target, ":", "_", -1) + ".pid")
-	f.WriteString(fmt.Sprint(os.Getpid()))
-	defer f.Close()
-
 	var err error
-	ad, err = ssdp.Advertise(
-		"urn:schemas-upnp-org:service:ContentDirectory:1",                                         // send as "ST"
-		fmt.Sprintf("uuid:%s::urn:schemas-upnp-org:service:ContentDirectory:1", uuid.NewString()), // send as "USN"
-		fmt.Sprintf("http://%s/rootDesc.xml", *listen),                                            // send as "LOCATION"
-		"Go DLNA proxy server", // send as "SERVER"
-		1800)                   // send as "maxAge" in "CACHE-CONTROL"
+
+	interfaces, err := net.Interfaces()
 	if err != nil {
 		panic(err)
 	}
-	m := &ssdp.Monitor{
-		Search: onSearch,
+
+	ifaceMap := make(map[int]Iface)
+	idx := 1
+	for _, iface := range interfaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if !addr.(*net.IPNet).IP.IsLoopback() && addr.(*net.IPNet).IP.IsPrivate() {
+				i := Iface{
+					InterfaceName: iface.Name,
+					InterfaceIP:   addr.(*net.IPNet).IP.String(),
+				}
+				ifaceMap[idx] = i
+				idx++
+			}
+		}
 	}
-	m.Start()
+
+	for idx, val := range ifaceMap {
+		fmt.Println(fmt.Sprintf("%d: %s (%s)", idx, val.InterfaceName, val.InterfaceIP))
+	}
+
+	fmt.Print("Select interface to listen on: ")
+
+	//ok := false
+	selected := 1
+
+	input := bufio.NewScanner(os.Stdin)
+
+	for input.Scan() {
+		i, err := strconv.Atoi(input.Text())
+		if err == nil && i > 0 && i <= len(ifaceMap) {
+			selected = i
+			break
+		}
+		fmt.Print("Not a valid choice. Select again: ")
+	}
+
+	listen = ifaceMap[selected].InterfaceIP + ":0"
+	target = flag.String("target", "127.0.0.1:8201", "The IP and port of the target")
+	transcode = flag.Bool("transcode", false, "Transcode unsupported audio (experimental)")
+	flag.Parse()
 
 	remote, err := url.Parse("http://" + *target + "/")
 	if err != nil {
@@ -126,11 +158,32 @@ func main() {
 		}
 	}
 
-	proxy := httputil.NewSingleHostReverseProxy(remote)
-	proxy.ModifyResponse = rewriteBody
-	http.HandleFunc("/", handler(proxy))
-	err = http.ListenAndServe(*listen, nil)
+	listener, _ := net.Listen("tcp", listen)
+
+	listen = listener.Addr().String()
+	fmt.Println("Listening on " + listen)
+
+	f, _ := os.Create("dlnaproxy." + strings.Replace(*target, ":", "_", -1) + ".pid")
+	f.WriteString(fmt.Sprint(os.Getpid()))
+	defer f.Close()
+
+	ad, err = ssdp.Advertise(
+		"urn:schemas-upnp-org:service:ContentDirectory:1",                                         // send as "ST"
+		fmt.Sprintf("uuid:%s::urn:schemas-upnp-org:service:ContentDirectory:1", uuid.NewString()), // send as "USN"
+		fmt.Sprintf("http://%s/rootDesc.xml", listen),                                             // send as "LOCATION"
+		"Go DLNA proxy server", // send as "SERVER"
+		1800)                   // send as "maxAge" in "CACHE-CONTROL"
 	if err != nil {
 		panic(err)
 	}
+	m := &ssdp.Monitor{
+		Search: onSearch,
+	}
+	m.Start()
+
+	proxy := httputil.NewSingleHostReverseProxy(remote)
+	proxy.ModifyResponse = rewriteBody
+
+	http.HandleFunc("/", handler(proxy))
+	panic(http.Serve(listener, nil))
 }
