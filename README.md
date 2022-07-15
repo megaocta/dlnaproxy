@@ -10,4 +10,4 @@ Build-all.bat builds for 64-bit Windows, 64-bit Linux, 32-bit ARM and compresses
 
 # Usage 
 
-./dlnaproxy -target=<HTTP ip>:<HTTP port>
+./dlnaproxy -target=&lt;HTTP ip&gt;:&lt;HTTP port&gt;
