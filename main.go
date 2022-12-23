@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -42,7 +43,7 @@ func rewriteBody(resp *http.Response) (err error) {
 		if strings.Contains(val, "text/xml") {
 			log.Println("Rewrote XML response")
 
-			b, err := ioutil.ReadAll(resp.Body)
+			b, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return err
 			}
@@ -50,8 +51,10 @@ func rewriteBody(resp *http.Response) (err error) {
 			if err != nil {
 				return err
 			}
-			b = bytes.Replace(b, []byte("http://"+*target+"/"), []byte("http://"+listen+"/"), -1) // replace original url with proxy url
-			body := ioutil.NopCloser(bytes.NewReader(b))
+			reg := regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\:\d+`)
+			//b = bytes.Replace(b, []byte("http://"+*target+"/"), []byte("http://"+listen+"/"), -1) // replace original url with proxy url
+			b = reg.ReplaceAll(b, []byte(listen))
+			body := io.NopCloser(bytes.NewReader(b))
 			resp.Body = body
 			resp.ContentLength = int64(len(b))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(b)))
@@ -59,7 +62,7 @@ func rewriteBody(resp *http.Response) (err error) {
 		}
 		if strings.Contains(val, "audio/ogg") && *transcode {
 			log.Println("OGG audio will be transcoded to FLAC")
-			b, err := ioutil.ReadAll(resp.Body)
+			b, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return err
 			}
@@ -84,7 +87,7 @@ func rewriteBody(resp *http.Response) (err error) {
 			stdin.Close()               // close the stdin, or ffmpeg will wait forever
 			cmd.Wait()                  // wait until ffmpeg finish
 
-			body := ioutil.NopCloser(bytes.NewReader(stdout.Bytes()))
+			body := io.NopCloser(bytes.NewReader(stdout.Bytes()))
 			resp.Body = body
 			resp.ContentLength = int64(len(stdout.Bytes()))
 			resp.Header.Set("Content-Length", strconv.Itoa(len(stdout.Bytes())))
@@ -105,7 +108,7 @@ func main() {
 	}
 
 	ifaceMap := make(map[int]Iface)
-	idx := 1
+	idx := 0
 	for _, iface := range interfaces {
 		addrs, _ := iface.Addrs()
 		for _, addr := range addrs {
@@ -120,17 +123,22 @@ func main() {
 		}
 	}
 
-	for idx, val := range ifaceMap {
-		fmt.Println(fmt.Sprintf("%d: %s (%s)", idx, val.InterfaceName, val.InterfaceIP))
+	target = flag.String("target", "", "The IP and port of the target")
+	transcode = flag.Bool("transcode", false, "Transcode unsupported audio (experimental)")
+	flag.Parse()
+	if *target == "" {
+		fmt.Println("No target specified!")
+		flag.PrintDefaults()
+		os.Exit(0)
 	}
 
+	for c := 0; c < idx; c++ {
+		fmt.Println(fmt.Sprintf("%d: %s (%s)", c+1, ifaceMap[c].InterfaceName, ifaceMap[c].InterfaceIP))
+	}
 	fmt.Print("Select interface to listen on: ")
 
-	//ok := false
-	selected := 1
-
+	selected := 0
 	input := bufio.NewScanner(os.Stdin)
-
 	for input.Scan() {
 		i, err := strconv.Atoi(input.Text())
 		if err == nil && i > 0 && i <= len(ifaceMap) {
@@ -140,10 +148,7 @@ func main() {
 		fmt.Print("Not a valid choice. Select again: ")
 	}
 
-	listen = ifaceMap[selected].InterfaceIP + ":0"
-	target = flag.String("target", "127.0.0.1:8201", "The IP and port of the target")
-	transcode = flag.Bool("transcode", false, "Transcode unsupported audio (experimental)")
-	flag.Parse()
+	listen = ifaceMap[selected-1].InterfaceIP + ":0"
 
 	remote, err := url.Parse("http://" + *target + "/")
 	if err != nil {
