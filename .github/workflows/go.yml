@@ -23,6 +23,12 @@ jobs:
 
     - name: Build
       run: GOOS=windows GOARCH=amd64 go build -v ./...
+      
+    - name: Upload binary
+      uses: actions/upload-artifact@v3
+      with:
+        name: binary
+        path: ./dlnaproxy.exe
 
 #    - name: Test
 #      run: go test -v ./...
